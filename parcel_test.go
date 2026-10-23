@@ -2,23 +2,35 @@ package main
 
 import (
 	"database/sql"
-	"math/rand"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-var (
-	// randSource источник псевдо случайных чисел.
-	// Для повышения уникальности в качестве seed
-	// используется текущее время в unix формате (в виде числа)
-	randSource = rand.NewSource(time.Now().UnixNano())
-	// randRange использует randSource для генерации случайных чисел
-	randRange = rand.New(randSource)
-)
+// newTestStore создаёт отдельную SQLite-базу для каждого теста.
+// Исходный файл tracker.db при выполнении тестов не изменяется.
+func newTestStore(t *testing.T) ParcelStore {
+	t.Helper()
 
-// getTestParcel возвращает тестовую посылку
+	path := filepath.Join(t.TempDir(), "tracker_test.db")
+	db, err := sql.Open("sqlite", path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	_, err = db.Exec(`
+		CREATE TABLE parcel (
+			number INTEGER PRIMARY KEY AUTOINCREMENT,
+			client INTEGER NOT NULL,
+			status VARCHAR(128) NOT NULL,
+			address VARCHAR(512) NOT NULL,
+			created_at TEXT NOT NULL
+		)`)
+	require.NoError(t, err)
+	return NewParcelStore(db)
+}
+
 func getTestParcel() Parcel {
 	return Parcel{
 		Client:    1000,
@@ -28,94 +40,148 @@ func getTestParcel() Parcel {
 	}
 }
 
-// TestAddGetDelete проверяет добавление, получение и удаление посылки
+// TestAddGetDelete проверяет регистрацию, получение и удаление посылки.
 func TestAddGetDelete(t *testing.T) {
-	// prepare
-	db, err := // настройте подключение к БД
-	store := NewParcelStore(db)
+	store := newTestStore(t)
 	parcel := getTestParcel()
 
-	// add
-	// добавьте новую посылку в БД, убедитесь в отсутствии ошибки и наличии идентификатора
+	id, err := store.Add(parcel)
+	require.NoError(t, err)
+	require.Positive(t, id)
+	parcel.Number = id
 
-	// get
-	// получите только что добавленную посылку, убедитесь в отсутствии ошибки
-	// проверьте, что значения всех полей в полученном объекте совпадают со значениями полей в переменной parcel
+	stored, err := store.Get(id)
+	require.NoError(t, err)
+	require.Equal(t, parcel, stored)
 
-	// delete
-	// удалите добавленную посылку, убедитесь в отсутствии ошибки
-	// проверьте, что посылку больше нельзя получить из БД
+	require.NoError(t, store.Delete(id))
+	_, err = store.Get(id)
+	require.ErrorIs(t, err, sql.ErrNoRows)
 }
 
-// TestSetAddress проверяет обновление адреса
+// TestSetAddress проверяет изменение адреса только у зарегистрированной посылки.
 func TestSetAddress(t *testing.T) {
-	// prepare
-	db, err := // настройте подключение к БД
+	store := newTestStore(t)
+	parcel := getTestParcel()
+	id, err := store.Add(parcel)
+	require.NoError(t, err)
 
-	// add
-	// добавьте новую посылку в БД, убедитесь в отсутствии ошибки и наличии идентификатора
-
-	// set address
-	// обновите адрес, убедитесь в отсутствии ошибки
 	newAddress := "new test address"
+	require.NoError(t, store.SetAddress(id, newAddress))
+	stored, err := store.Get(id)
+	require.NoError(t, err)
+	require.Equal(t, newAddress, stored.Address)
 
-	// check
-	// получите добавленную посылку и убедитесь, что адрес обновился
+	// После отправки адрес менять нельзя.
+	require.NoError(t, store.SetStatus(id, ParcelStatusSent))
+	require.NoError(t, store.SetAddress(id, "запрещённый адрес"))
+	stored, err = store.Get(id)
+	require.NoError(t, err)
+	require.Equal(t, newAddress, stored.Address)
 }
 
-// TestSetStatus проверяет обновление статуса
+// TestSetStatus проверяет обновление статуса.
 func TestSetStatus(t *testing.T) {
-	// prepare
-	db, err := // настройте подключение к БД
+	store := newTestStore(t)
+	id, err := store.Add(getTestParcel())
+	require.NoError(t, err)
 
-	// add
-	// добавьте новую посылку в БД, убедитесь в отсутствии ошибки и наличии идентификатора
+	require.NoError(t, store.SetStatus(id, ParcelStatusSent))
+	stored, err := store.Get(id)
+	require.NoError(t, err)
+	require.Equal(t, ParcelStatusSent, stored.Status)
 
-	// set status
-	// обновите статус, убедитесь в отсутствии ошибки
-
-	// check
-	// получите добавленную посылку и убедитесь, что статус обновился
+	require.NoError(t, store.SetStatus(id, ParcelStatusDelivered))
+	stored, err = store.Get(id)
+	require.NoError(t, err)
+	require.Equal(t, ParcelStatusDelivered, stored.Status)
 }
 
-// TestGetByClient проверяет получение посылок по идентификатору клиента
+// TestGetByClient проверяет, что возвращаются все и только посылки указанного клиента.
 func TestGetByClient(t *testing.T) {
-	// prepare
-	db, err := // настройте подключение к БД
+	store := newTestStore(t)
+	const client = 12345
 
-	parcels := []Parcel{
-		getTestParcel(),
-		getTestParcel(),
-		getTestParcel(),
-	}
-	parcelMap := map[int]Parcel{}
-
-	// задаём всем посылкам один и тот же идентификатор клиента
-	client := randRange.Intn(10_000_000)
-	parcels[0].Client = client
-	parcels[1].Client = client
-	parcels[2].Client = client
-
-	// add
-	for i := 0; i < len(parcels); i++ {
-		id, err := // добавьте новую посылку в БД, убедитесь в отсутствии ошибки и наличии идентификатора
-
-		// обновляем идентификатор добавленной у посылки
-		parcels[i].Number = id
-
-		// сохраняем добавленную посылку в структуру map, чтобы её можно было легко достать по идентификатору посылки
-		parcelMap[id] = parcels[i]
+	want := make(map[int]Parcel)
+	for i := 0; i < 3; i++ {
+		parcel := getTestParcel()
+		parcel.Client = client
+		parcel.Address = "адрес " + string(rune('A'+i))
+		id, err := store.Add(parcel)
+		require.NoError(t, err)
+		parcel.Number = id
+		want[id] = parcel
 	}
 
-	// get by client
-	storedParcels, err := // получите список посылок по идентификатору клиента, сохранённого в переменной client
-	// убедитесь в отсутствии ошибки
-	// убедитесь, что количество полученных посылок совпадает с количеством добавленных
+	// Посылка другого клиента не должна попасть в результат.
+	other := getTestParcel()
+	other.Client = 54321
+	_, err := store.Add(other)
+	require.NoError(t, err)
 
-	// check
-	for _, parcel := range storedParcels {
-		// в parcelMap лежат добавленные посылки, ключ - идентификатор посылки, значение - сама посылка
-		// убедитесь, что все посылки из storedParcels есть в parcelMap
-		// убедитесь, что значения полей полученных посылок заполнены верно
+	stored, err := store.GetByClient(client)
+	require.NoError(t, err)
+	require.Len(t, stored, len(want))
+	for _, parcel := range stored {
+		expected, ok := want[parcel.Number]
+		require.True(t, ok, "неожиданная посылка № %d", parcel.Number)
+		require.Equal(t, expected, parcel)
 	}
+
+	empty, err := store.GetByClient(999999)
+	require.NoError(t, err)
+	require.Empty(t, empty)
+}
+
+// TestDeleteSentParcel проверяет, что отправленную посылку нельзя удалить.
+func TestDeleteSentParcel(t *testing.T) {
+	store := newTestStore(t)
+	id, err := store.Add(getTestParcel())
+	require.NoError(t, err)
+
+	require.NoError(t, store.SetStatus(id, ParcelStatusSent))
+	require.NoError(t, store.Delete(id))
+	stored, err := store.Get(id)
+	require.NoError(t, err)
+	require.Equal(t, ParcelStatusSent, stored.Status)
+}
+
+// TestParcelServiceLifecycle проверяет полный сценарий задания через ParcelService.
+func TestParcelServiceLifecycle(t *testing.T) {
+	store := newTestStore(t)
+	service := NewParcelService(store)
+
+	parcel, err := service.Register(7, "старый адрес")
+	require.NoError(t, err)
+	require.Positive(t, parcel.Number)
+	require.Equal(t, ParcelStatusRegistered, parcel.Status)
+
+	require.NoError(t, service.ChangeAddress(parcel.Number, "новый адрес"))
+	stored, err := store.Get(parcel.Number)
+	require.NoError(t, err)
+	require.Equal(t, "новый адрес", stored.Address)
+
+	require.NoError(t, service.NextStatus(parcel.Number))
+	stored, err = store.Get(parcel.Number)
+	require.NoError(t, err)
+	require.Equal(t, ParcelStatusSent, stored.Status)
+
+	// Отправленную посылку нельзя удалить или переадресовать.
+	require.NoError(t, service.Delete(parcel.Number))
+	require.NoError(t, service.ChangeAddress(parcel.Number, "ещё один адрес"))
+	stored, err = store.Get(parcel.Number)
+	require.NoError(t, err)
+	require.Equal(t, "новый адрес", stored.Address)
+
+	require.NoError(t, service.NextStatus(parcel.Number))
+	require.NoError(t, service.NextStatus(parcel.Number)) // Доставленная остаётся доставленной.
+	stored, err = store.Get(parcel.Number)
+	require.NoError(t, err)
+	require.Equal(t, ParcelStatusDelivered, stored.Status)
+
+	fresh, err := service.Register(7, "удаляемая посылка")
+	require.NoError(t, err)
+	require.NoError(t, service.Delete(fresh.Number))
+	_, err = store.Get(fresh.Number)
+	require.ErrorIs(t, err, sql.ErrNoRows)
 }
